@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fireworks</title>
+<style>
+  :root {
+    --ink: #f3efe6;
+    --dim: rgba(243, 239, 230, .65);
+    --glass: rgba(12, 14, 24, .6);
+    --line: rgba(243, 239, 230, .25);
+    --on: #ffd27a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060c; color: var(--ink); font: 15px/1.4 system-ui, sans-serif; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #fg { cursor: crosshair; touch-action: none; }
+  header { position: fixed; top: 20px; left: 24px; right: 24px; pointer-events: none; text-shadow: 0 1px 8px #000; }
+  h1 { margin: 0; font: 400 34px/1.1 Georgia, serif; }
+  header p { margin: 6px 0 0; color: var(--dim); max-width: 34em; }
+  form { position: fixed; left: 0; right: 0; bottom: 16px; padding: 0 16px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; pointer-events: none; }
+  form > * { pointer-events: auto; font: inherit; color: var(--ink); background: var(--glass); border: 1px solid var(--line); border-radius: 999px; padding: 9px 16px; }
+  input { width: min(240px, 60vw); }
+  input::placeholder { color: var(--dim); }
+  button { cursor: pointer; }
+  button[aria-pressed="true"] { color: var(--on); border-color: var(--on); }
+  button[aria-pressed="true"]::before { content: "● "; }
+  button[aria-pressed="false"]::before { content: "○ "; }
+  :focus-visible { outline: 2px solid var(--on); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<!-- Three layers, back to front: sky (moon, clouds), fireworks, ground (shops, people). -->
+<canvas id="bg"></canvas>
+<canvas id="fx"></canvas>
+<canvas id="fg"></canvas>
+
+<header>
+  <h1>Fireworks</h1>
+  <p>Click the sky to send up a shell. Type a name and press Enter to see it written in fireworks.</p>
+</header>
+
+<form id="ui">
+  <input id="name" maxlength="14" autocomplete="off" placeholder="Type a name…" aria-label="Name to write in fireworks">
+  <button type="submit">Launch name</button>
+  <button type="button" id="auto" aria-pressed="true">Auto show</button>
+  <button type="button" id="sound" aria-pressed="true">Sound</button>
+</form>
+
+<script>
+'use strict';
+
+const $ = id => document.getElementById(id);
+const bg = $('bg').getContext('2d'), fx = $('fx').getContext('2d'), fg = $('fg').getContext('2d');
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = list => list[Math.random() * list.length | 0];
+
+// Fixed-seed random numbers, so the street looks the same after every resize.
+function seeded(a) {
+  return () => {
+    a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+let W, H, groundY, unit;          // unit scales sizes and speeds with the window height
+let sky, clouds = [];
+let shells = [], parts = [];
+let flash = { x: 0, y: 0, h: 0, s: 0, a: 0 };   // the glow a burst throws on the sky
+
+/* ---------- Scenery ---------- */
+
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  groundY = H * .87;
+  unit = Math.max(.6, Math.min(1.3, H / 720));
+  for (const c of [bg, fx, fg]) {
+    c.canvas.width = W * dpr; c.canvas.height = H * dpr;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  drawSky(dpr); makeClouds(); drawGround();
+}
+
+// Sky gradient, stars and moon never change, so they are painted once and reused every frame.
+function drawSky(dpr) {
+  sky = document.createElement('canvas');
+  sky.width = W * dpr; sky.height = H * dpr;
+  const g = sky.getContext('2d'), r = seeded(7);
+  g.scale(dpr, dpr);
+
+  const night = g.createLinearGradient(0, 0, 0, groundY);
+  night.addColorStop(0, '#04050d'); night.addColorStop(.6, '#0c1230'); night.addColorStop(1, '#2b3160');
+  g.fillStyle = night; g.fillRect(0, 0, W, H);
+
+  for (let i = 0; i < W * H / 5000; i++) {
+    g.fillStyle = `rgba(255,255,255,${.15 + r() * .6})`;
+    const s = r() < .9 ? 1 : 1.6;
+    g.fillRect(r() * W, r() * groundY * .9, s, s);
+  }
+
+  const mx = W * .8, my = H * .2, mr = 34 * unit;
+  const glow = g.createRadialGradient(mx, my, mr * .8, mx, my, mr * 6);
+  glow.addColorStop(0, 'rgba(200,215,255,.28)'); glow.addColorStop(1, 'rgba(200,215,255,0)');
+  g.fillStyle = glow; g.fillRect(mx - mr * 6, my - mr * 6, mr * 12, mr * 12);
+  g.fillStyle = '#eef0e4';
+  g.beginPath(); g.arc(mx, my, mr, 0, 7); g.fill();
+  g.fillStyle = 'rgba(120,130,150,.25)';   // craters
+  for (const [dx, dy, s] of [[-.35, -.2, .22], [.25, .3, .16], [.1, -.4, .1], [-.2, .4, .12], [.45, -.1, .08]]) {
+    g.beginPath(); g.arc(mx + dx * mr, my + dy * mr, s * mr, 0, 7); g.fill();
+  }
+}
+
+// Each cloud is a cluster of soft blobs painted once; the frame loop only slides it sideways.
+function makeClouds() {
+  clouds = Array.from({ length: 7 }, (_, i) => {
+    const w = rand(320, 640) * unit, h = w * rand(.2, .28);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    for (let j = 0; j < 60; j++) {
+      // Many faint puffs, crowded toward the middle, blend into one soft shape with wispy ends.
+      const x = (.15 + .7 * (Math.random() + Math.random()) / 2) * w, y = rand(.42, .6) * h, r = rand(.2, .4) * h;
+      const puff = g.createRadialGradient(x, y, 0, x, y, r);
+      puff.addColorStop(0, 'rgba(170,182,215,.06)'); puff.addColorStop(1, 'rgba(170,182,215,0)');
+      g.fillStyle = puff; g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    return { c, w, x: rand(-w, W), y: rand(.04, .5) * H, speed: rand(4, 14) * (i % 2 ? 1 : .6) };
+  });
+}
+
+// A row of shops, a street and a crowd, all in shades of black.
+function drawGround() {
+  const g = fg, r = seeded(11), u = unit;
+  g.clearRect(0, 0, W, H);
+
+  for (let x = -20 * u; x < W;) {
+    const w = (70 + r() * 80) * u, h = (48 + r() * 54) * u, top = groundY - h, roof = r() * 4 | 0;
+    g.fillStyle = '#141826';
+    g.fillRect(x, top, w, h);
+    if (roof === 0) g.fillRect(x + w * .15, top - 13 * u, w * .7, 13 * u);            // sign board
+    if (roof === 1) {                                                                  // gable
+      g.beginPath(); g.moveTo(x - 4 * u, top); g.lineTo(x + w / 2, top - h * .4); g.lineTo(x + w + 4 * u, top); g.fill();
+    }
+    if (roof === 2) g.fillRect(x + w * .7, top - 16 * u, 9 * u, 16 * u);              // chimney
+    g.fillStyle = '#1d2233';                                                           // shop window and door
+    g.fillRect(x + w * .1, groundY - 30 * u, w * .5, 22 * u);
+    g.fillRect(x + w * .7, groundY - 30 * u, w * .18, 30 * u);
+    g.fillStyle = '#07080d';                                                           // awning with a scalloped edge
+    g.fillRect(x + w * .05, groundY - 40 * u, w * .9, 8 * u);
+    for (let s = x + w * .05 + 4 * u; s < x + w * .95; s += 8 * u) {
+      g.beginPath(); g.arc(s, groundY - 32 * u, 4 * u, 0, Math.PI); g.fill();
+    }
+    x += w;
+    if (r() < .3) {                                                                    // a gap with a street lamp
+      const gap = (22 + r() * 24) * u;
+      g.fillRect(x + gap / 2 - 1.5 * u, groundY - 72 * u, 3 * u, 72 * u);
+      g.beginPath(); g.arc(x + gap / 2, groundY - 74 * u, 5 * u, 0, 7); g.fill();
+      x += gap;
+    }
+  }
+
+  g.fillStyle = '#0c0e16';
+  g.fillRect(0, groundY, W, H - groundY);
+
+  // d is depth: 0 is far (small, up by the shops), 1 is near (large, at the bottom). Far people are drawn first.
+  const crowd = Array.from({ length: W / 24 | 0 }, () => ({ x: r() * W, d: r(), child: r() < .18, arm: r() }))
+    .sort((a, b) => a.d - b.d);
+  g.fillStyle = g.strokeStyle = '#000';
+  g.lineCap = 'round';
+  for (const p of crowd) {
+    person(g, p.x, groundY + (H - groundY) * (.2 + .8 * p.d), (40 + p.d * 30) * u * (p.child ? .62 : 1), p.arm);
+  }
+}
+
+// x, y is where the feet are; h is the height. arm < .3 means one arm points up at the sky.
+function person(g, x, y, h, arm) {
+  const w = h * .27;
+  g.beginPath(); g.arc(x, y - h * .91, h * .085, 0, 7); g.fill();                        // head
+  g.beginPath(); g.roundRect(x - w / 2, y - h * .8, w, h * .42, w * .35); g.fill();     // body
+  g.fillRect(x - w * .42, y - h * .45, w * .36, h * .45);                               // legs
+  g.fillRect(x + w * .06, y - h * .45, w * .36, h * .45);
+  if (arm < .3) {
+    const side = arm < .15 ? -1 : 1;
+    g.lineWidth = w * .26;
+    g.beginPath(); g.moveTo(x + side * w * .4, y - h * .74); g.lineTo(x + side * w * .95, y - h * 1.02); g.stroke();
+  }
+}
+
+/* ---------- Sound (all synthesised, no audio files) ---------- */
+
+let ac, out, verb, noise, crack, soundOn = true;
+
+// Browsers only allow sound after a click or key press, so this is called from those handlers.
+function audio() {
+  if (!soundOn) return null;
+  if (!ac) {
+    ac = new AudioContext();
+    out = ac.createDynamicsCompressor();   // stops many booms at once from distorting
+    out.connect(ac.destination);
+
+    const buffer = (seconds, fill) => {
+      const b = ac.createBuffer(1, seconds * ac.sampleRate, ac.sampleRate);
+      fill(b.getChannelData(0));
+      return b;
+    };
+    noise = buffer(2, d => { for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; });
+    crack = buffer(1.2, d => {             // about 70 tiny clicks, denser at the start
+      for (let k = 0; k < 70; k++) {
+        const at = Math.random() ** 1.5 * (d.length - 400) | 0, amp = rand(.3, 1);
+        for (let i = 0; i < 300; i++) d[at + i] += (Math.random() * 2 - 1) * amp * (1 - i / 300) ** 2;
+      }
+    });
+    verb = ac.createConvolver();           // open-air echo: fading noise as the impulse response
+    verb.buffer = buffer(3, d => { for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 4; });
+    const wet = ac.createGain();
+    wet.gain.value = .3;
+    verb.connect(wet).connect(out);
+  }
+  if (ac.state === 'suspended') ac.resume();
+  return ac;
+}
+
+// Connects source → … → stereo position (from screen x) → speakers and echo.
+function route(x, ...nodes) {
+  const pan = ac.createStereoPanner();
+  pan.pan.value = (x / W * 2 - 1) * .7;
+  nodes.push(pan);
+  nodes.reduce((a, b) => (a.connect(b), b));
+  pan.connect(out); pan.connect(verb);
+}
+
+// Filtered noise that fades out: the body of every boom, hiss and crackle.
+function hiss(x, t, { buf = noise, type, f0, f1, vol, dur, rate = 1 }) {
+  const src = ac.createBufferSource(), filter = ac.createBiquadFilter(), gain = ac.createGain();
+  src.buffer = buf; src.loop = buf === noise; src.playbackRate.value = rate;
+  filter.type = type;
+  filter.frequency.setValueAtTime(f0, t); filter.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  route(x, src, filter, gain);
+  src.start(t, buf === noise ? Math.random() : 0); src.stop(t + dur);
+}
+
+// A sine wave that slides from f0 to f1 and fades out: thumps and whistles.
+function tone(x, t, f0, f1, vol, dur) {
+  const osc = ac.createOscillator(), gain = ac.createGain();
+  osc.frequency.setValueAtTime(f0, t); osc.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  route(x, osc, gain);
+  osc.start(t); osc.stop(t + dur);
+}
+
+function soundLaunch(x) {
+  if (!audio()) return;
+  const t = ac.currentTime;
+  tone(x, t, 150, 50, .25, .18);                                                      // mortar thump
+  hiss(x, t, { type: 'bandpass', f0: 400, f1: 1800, vol: .06, dur: .9 });             // rising whoosh
+  if (Math.random() < .2) tone(x, t, 1100, 2300, .025, 1);                            // some shells whistle
+}
+
+function soundBoom(x, vol, crackles) {
+  if (!audio()) return;
+  const t = ac.currentTime + rand(.1, .25);   // sound arrives a moment after the light, as in real life
+  vol *= rand(.6, 1);
+  hiss(x, t, { type: 'lowpass', f0: rand(900, 2200), f1: 60, vol: .9 * vol, dur: rand(1.2, 2), rate: rand(.5, 1) });
+  tone(x, t, rand(90, 130), 36, .8 * vol, .45);
+  if (crackles) hiss(x, t + .7, { buf: crack, type: 'highpass', f0: 3000, f1: 2500, vol: .5, dur: 1.2 });
+}
+
+/* ---------- Fireworks ---------- */
+
+const HUES = [2, 22, 45, 58, 125, 170, 205, 262, 312];
+const KINDS = ['peony', 'peony', 'ring', 'willow', 'heart', 'crackle'];
+const color = () => Math.random() < .12 ? { h: 45, s: 12 } : { h: pick(HUES), s: 100 };   // 12% are silver
+
+// Adds one spark. Speeds are pixels per second; drag is the speed kept per 1/60 s; g is gravity.
+function spark(x, y, vx, vy, options) {
+  const p = { x, y, px: x, py: y, vx, vy, drag: .965, g: 70 * unit, w: 1.8, life: 1.4, h: 45, s: 100, hold: 0, pops: false, ...options };
+  p.max = p.life;
+  parts.push(p);
+}
+
+// Sends a shell from the ground to (tx, ty). It slows as it climbs and bursts at the top.
+function launch(tx, ty, burst = explode, x0 = tx + rand(-40, 40) * unit) {
+  const time = rand(1, 1.35), g = 2 * (groundY - ty) / (time * time);
+  shells.push({ x: x0, y: groundY, vx: (tx - x0) / time, vy: -g * time, g, burst });
+  soundLaunch(x0);
+}
+
+function explode(x, y, kind = pick(KINDS)) {
+  const c = color(), v = rand(250, 370) * unit;
+  flash = { x, y, ...c, a: 1 };
+  soundBoom(x, 1, kind === 'crackle');
+
+  if (kind === 'peony' || kind === 'crackle') {       // a ball of sparks with a second colour at the core
+    const core = color();
+    for (let i = 0; i < 140; i++) {
+      // A random direction on a sphere, seen from the front: this makes the edge denser, like a real shell.
+      const z = rand(-1, 1), a = rand(0, 7), r = Math.sqrt(1 - z * z) * rand(.92, 1) * (i % 4 ? 1 : .5);
+      spark(x, y, Math.cos(a) * r * v, Math.sin(a) * r * v, { ...(i % 4 ? c : core), life: rand(1, 1.6), pops: kind === 'crackle' });
+    }
+  } else if (kind === 'ring') {                       // a tilted ring
+    const tilt = rand(.25, .7), turn = rand(0, 3), cos = Math.cos(turn), sin = Math.sin(turn);
+    for (let i = 0; i < 80; i++) {
+      const a = i / 80 * Math.PI * 2, dx = Math.cos(a) * v, dy = Math.sin(a) * v * tilt;
+      spark(x, y, dx * cos - dy * sin, dx * sin + dy * cos, { ...c, life: rand(1.2, 1.5), g: 40 * unit });
+    }
+  } else if (kind === 'willow') {                     // long gold sparks that droop
+    for (let i = 0; i < 110; i++) {
+      const a = rand(0, 7), r = Math.sqrt(Math.random()) * v * .75;
+      spark(x, y, Math.cos(a) * r, Math.sin(a) * r, { h: 42, s: 95, life: rand(2.2, 3.2), drag: .975, g: 110 * unit, w: 1.4 });
+    }
+  } else {                                            // heart
+    const h = pick([350, 330, 0]);
+    for (let i = 0; i < 110; i++) {
+      const a = i / 110 * Math.PI * 2, k = v * .8 / 16 * rand(.96, 1.04);
+      spark(x, y, 16 * Math.sin(a) ** 3 * k, -(13 * Math.cos(a) - 5 * Math.cos(2 * a) - 2 * Math.cos(3 * a) - Math.cos(4 * a)) * k,
+        { h, s: 100, life: rand(1.4, 1.8), g: 35 * unit });
+    }
+  }
+}
+
+// Turns text into dots: draws it off-screen, then keeps every lit point on a grid.
+// Returns one entry per visible letter: its centre (cx, cy) and its dots.
+function textPoints(text) {
+  const chars = [...text], c = document.createElement('canvas'), g = c.getContext('2d');
+  const font = size => `700 ${size}px "Trebuchet MS", "Segoe UI", sans-serif`;
+  g.font = font(100);
+  const size = Math.min(H * .2, 100 * W * .86 / g.measureText(text).width);
+  c.width = W; c.height = Math.ceil(size * 1.4);
+  g.font = font(size); g.textBaseline = 'middle';
+  const width = upTo => g.measureText(chars.slice(0, upTo).join('')).width;
+  const left = (W - width(chars.length)) / 2, cy = H * .3, top = cy - c.height / 2;
+  g.fillText(text, left, c.height / 2);
+
+  const pixels = g.getImageData(0, 0, c.width, c.height).data;
+  const step = Math.max(3, Math.sqrt(width(chars.length) * size * .3 / 1800) | 0);   // keeps the total near 1800 dots
+  return chars.map((_, i) => {
+    const from = Math.ceil(left + width(i)), to = left + width(i + 1), pts = [];
+    for (let x = from; x < to; x += step)
+      for (let y = 0; y < c.height; y += step)
+        if (pixels[(y * c.width + x) * 4 + 3] > 128)   // nudge each dot off the grid so it looks like sparks, not a sign
+          pts.push([x + rand(-.4, .4) * step, y + top + rand(-.4, .4) * step]);
+    return { cx: (from + to) / 2, cy, pts };
+  }).filter(letter => letter.pts.length);
+}
+
+// One shell per letter, left to right. Each bursts into dots that fly into the letter's shape.
+function writeName(text) {
+  const letters = textPoints(text), h0 = rand(0, 360);
+  letters.forEach((letter, i) => setTimeout(() => {
+    launch(letter.cx, letter.cy, (x, y) => {
+      const h = (h0 + i * 18) % 360;
+      flash = { x, y, h, s: 100, a: .6 };
+      soundBoom(x, .5, false);
+      const wait = 2.8 + (letters.length - 1 - i) * .14;   // earlier letters wait longer, so the whole name hangs together
+      for (const [tx, ty] of letter.pts) {
+        const hold = wait + rand(0, .3);
+        spark(x, y, 0, 0, { tx, ty, hold, life: hold + rand(.8, 1.4), h, s: 100, w: 2, g: 60 * unit, drag: .98 });
+      }
+    }, letter.cx + rand(-15, 15));
+  }, i * 140));
+}
+
+/* ---------- Frame loop ---------- */
+
+let autoOn = !matchMedia('(prefers-reduced-motion: reduce)').matches, nextAuto = 1, last = performance.now();
+
+function frame(now) {
+  const dt = Math.min(.033, (now - last) / 1000);
+  last = now;
+
+  // Sky layer: the painted sky, drifting clouds, and the glow of the latest burst.
+  bg.drawImage(sky, 0, 0, W, H);
+  for (const c of clouds) {
+    c.x += c.speed * dt;
+    if (c.x > W) c.x = -c.w;
+    bg.drawImage(c.c, c.x, c.y);
+  }
+  if (flash.a > .01) {
+    const glow = bg.createRadialGradient(flash.x, flash.y, 0, flash.x, flash.y, Math.max(W, H) * .6);
+    glow.addColorStop(0, `hsla(${flash.h},${flash.s}%,70%,${flash.a * .22})`);
+    glow.addColorStop(1, `hsla(${flash.h},${flash.s}%,70%,0)`);
+    bg.fillStyle = glow; bg.fillRect(0, 0, W, H);
+    flash.a *= Math.pow(.02, dt);
+  }
+
+  // Fireworks layer: fade what is there a little instead of clearing it, which leaves the trails.
+  if (!shells.length && !parts.length) fx.clearRect(0, 0, W, H);
+  fx.globalCompositeOperation = 'destination-out';
+  fx.fillStyle = `rgba(0,0,0,${1 - Math.pow(.8, dt * 60)})`;
+  fx.fillRect(0, 0, W, H);
+  fx.globalCompositeOperation = 'lighter';
+  fx.lineCap = 'round';
+
+  for (let i = shells.length - 1; i >= 0; i--) {
+    const s = shells[i], px = s.x, py = s.y;
+    s.vy += s.g * dt; s.x += s.vx * dt; s.y += s.vy * dt;
+    fx.strokeStyle = '#ffe9b0'; fx.lineWidth = 2.2;
+    fx.beginPath(); fx.moveTo(px, py); fx.lineTo(s.x, s.y); fx.stroke();
+    spark(s.x, s.y, rand(-15, 15), rand(10, 50), { life: rand(.2, .5), w: 1.2 });   // sparks shed on the way up
+    if (s.vy >= 0) { shells.splice(i, 1); s.burst(s.x, s.y); }
+  }
+
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.life -= dt;
+    if (p.life <= 0) {
+      if (p.pops) for (let k = 0; k < 3; k++) spark(p.x, p.y, rand(-60, 60), rand(-60, 60), { h: 45, s: 15, life: rand(.12, .3), w: 1.2 });
+      parts[i] = parts[parts.length - 1]; parts.pop();
+      continue;
+    }
+    p.px = p.x; p.py = p.y;
+    const holding = p.hold > 0;
+    if (holding) {                         // a name dot: glide to its place in the letter and hang there
+      p.hold -= dt;
+      const k = Math.min(1, dt * 7);
+      p.x += (p.tx - p.x) * k; p.y += (p.ty - p.y) * k;
+      if (p.hold <= 0) { p.vx = rand(-12, 12); p.vy = rand(-8, 14); }
+    } else {
+      const drag = Math.pow(p.drag, dt * 60);
+      p.vx *= drag; p.vy = p.vy * drag + p.g * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+    }
+    const t = p.life / p.max, flicker = t < .35 && Math.random() < .35 ? .3 : 1;   // white-hot at first, flickering as it dies
+    const c = `hsla(${p.h},${p.s}%,${50 + 45 * t * t}%,${Math.min(1, t * 2.5) * flicker})`;
+    if (holding) {                         // a line with no length draws nothing, so a still dot is a square
+      fx.fillStyle = c; fx.fillRect(p.x - p.w / 2, p.y - p.w / 2, p.w, p.w);
+    } else {
+      fx.strokeStyle = c; fx.lineWidth = p.w;
+      fx.beginPath(); fx.moveTo(p.px, p.py); fx.lineTo(p.x, p.y); fx.stroke();
+    }
+  }
+
+  if (autoOn && (nextAuto -= dt) < 0) {
+    launch(rand(.1, .9) * W, rand(.12, .5) * H);
+    nextAuto = rand(.5, 1.8);
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ---------- Controls ---------- */
+
+function toggle(button) {
+  const on = button.getAttribute('aria-pressed') !== 'true';
+  button.setAttribute('aria-pressed', on);
+  return on;
+}
+
+$('fg').addEventListener('pointerdown', e => {
+  audio();
+  const onGround = e.clientY > groundY - 60 * unit;   // a click on the street still sends one up, to a random height
+  launch(e.clientX, onGround ? rand(.15, .45) * H : e.clientY);
+});
+
+$('ui').addEventListener('submit', e => {
+  e.preventDefault();
+  audio();
+  const text = $('name').value.trim();
+  if (text) writeName(text);
+});
+
+// Typing anywhere goes into the name box.
+addEventListener('keydown', e => {
+  if (e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey && !e.altKey) $('name').focus();
+});
+
+$('auto').setAttribute('aria-pressed', autoOn);
+$('auto').onclick = e => { autoOn = toggle(e.target); };
+$('sound').onclick = e => { soundOn = toggle(e.target); soundOn ? audio() : ac && ac.suspend(); };
+
+addEventListener('resize', resize);
+resize();
+
+// Open index.html#selftest and check the console.
+if (location.hash === '#selftest') {
+  const letters = textPoints('A B');
+  console.assert(letters.length === 2 && letters.every(l => l.pts.length > 10), 'textPoints: expected two letters with dots');
+  console.log('selftest done');
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
